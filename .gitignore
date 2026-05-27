@@ -1,0 +1,14 @@
+# Customer-provided source document (not for redistribution)
+Historian Data Analysis.docx
+.tmp_docx/
+
+# Internal blog drafts
+docs/blog/
+
+# Internal voice calibration
+.github/.skills/VOICE_CALIBRATION.md
+
+# Local
+*.log
+.DS_Store
+Thumbs.db

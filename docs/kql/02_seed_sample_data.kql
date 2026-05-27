@@ -1,0 +1,42 @@
+// Seed data for Wonderware compatibility demo.
+// Uses relative timestamps (now() at execution time) so data always falls in "last 30 minutes".
+// Includes one late-arriving point that causes retroactive linear TWA drift — the key scenario.
+//
+// Run this any time to refresh demo data against the current clock.
+// Each run replaces ww_raw_analog entirely; ww_tag_config is idempotent.
+
+.set-or-replace ww_tag_config <|
+datatable(tag_name:string, interpolation_type:string, area:string, unit:string, is_enabled:bool, display_order:int, description:string)
+[
+  'WND_106_BATCH_BH_Actual_Weight_Silo1_Deviation', 'Linear',    'WND', '%',   true, 1, 'Silo1 weight deviation from setpoint',
+  'WND_106_BATCH_BH_Actual_Weight_Silo2_Deviation', 'Linear',    'WND', '%',   true, 2, 'Silo2 weight deviation from setpoint',
+  'WND_106_BATCH_Mixer_Temp',                       'StairStep', 'WND', 'C',   true, 3, 'Mixer temperature',
+  'WND_106_BATCH_LinePressure',                     'StairStep', 'WND', 'bar', true, 4, 'Line pressure'
+]
+
+// Replace so old fixed-date rows do not interfere with the relative-time window.
+// Note: datatable literals do not evaluate let-bound expressions, so use union(print ...) rows.
+.set-or-replace ww_raw_analog <|
+let _now = now();
+union
+  // ── Silo1 (Linear interpolation) ──────────────────────────────────────────
+  // Normal points arriving promptly.
+  (print tag_name='WND_106_BATCH_BH_Actual_Weight_Silo1_Deviation', source_timestamp=_now-26m, ingest_time=_now-26m, value=0.0,  quality='Good', source='Wonderware', source_iteration=long(1)),
+  (print tag_name='WND_106_BATCH_BH_Actual_Weight_Silo1_Deviation', source_timestamp=_now-22m, ingest_time=_now-22m, value=-0.5, quality='Good', source='Wonderware', source_iteration=long(2)),
+  // KEY: source_timestamp is 8 min ago but ingest_time is only 1 min ago — 7-min lag.
+  // This causes retroactive drift in the linear TWA for the ago(15m) bucket.
+  (print tag_name='WND_106_BATCH_BH_Actual_Weight_Silo1_Deviation', source_timestamp=_now-8m,  ingest_time=_now-1m,  value=0.0,  quality='Good', source='Wonderware', source_iteration=long(25)),
+  // ── Silo2 (Linear interpolation, stable baseline for comparison) ──────────
+  (print tag_name='WND_106_BATCH_BH_Actual_Weight_Silo2_Deviation', source_timestamp=_now-25m, ingest_time=_now-25m, value=0.1,  quality='Good', source='Wonderware', source_iteration=long(1)),
+  (print tag_name='WND_106_BATCH_BH_Actual_Weight_Silo2_Deviation', source_timestamp=_now-18m, ingest_time=_now-18m, value=0.0,  quality='Good', source='Wonderware', source_iteration=long(8)),
+  (print tag_name='WND_106_BATCH_BH_Actual_Weight_Silo2_Deviation', source_timestamp=_now-11m, ingest_time=_now-11m, value=-0.2, quality='Good', source='Wonderware', source_iteration=long(15)),
+  (print tag_name='WND_106_BATCH_BH_Actual_Weight_Silo2_Deviation', source_timestamp=_now-4m,  ingest_time=_now-4m,  value=0.1,  quality='Good', source='Wonderware', source_iteration=long(22)),
+  // ── Mixer Temp (StairStep) ────────────────────────────────────────────────
+  (print tag_name='WND_106_BATCH_Mixer_Temp', source_timestamp=_now-29m, ingest_time=_now-29m, value=68.5, quality='Good', source='Wonderware', source_iteration=long(1)),
+  (print tag_name='WND_106_BATCH_Mixer_Temp', source_timestamp=_now-19m, ingest_time=_now-19m, value=69.2, quality='Good', source='Wonderware', source_iteration=long(11)),
+  (print tag_name='WND_106_BATCH_Mixer_Temp', source_timestamp=_now-9m,  ingest_time=_now-9m,  value=70.1, quality='Good', source='Wonderware', source_iteration=long(21)),
+  // ── Line Pressure (StairStep) ─────────────────────────────────────────────
+  (print tag_name='WND_106_BATCH_LinePressure', source_timestamp=_now-29m, ingest_time=_now-29m, value=11.2, quality='Good', source='Wonderware', source_iteration=long(1)),
+  (print tag_name='WND_106_BATCH_LinePressure', source_timestamp=_now-23m, ingest_time=_now-23m, value=11.8, quality='Good', source='Wonderware', source_iteration=long(7)),
+  (print tag_name='WND_106_BATCH_LinePressure', source_timestamp=_now-13m, ingest_time=_now-13m, value=11.1, quality='Good', source='Wonderware', source_iteration=long(17)),
+  (print tag_name='WND_106_BATCH_LinePressure', source_timestamp=_now-5m,  ingest_time=_now-5m,  value=10.9, quality='Good', source='Wonderware', source_iteration=long(25))

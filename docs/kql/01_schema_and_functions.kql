@@ -1,0 +1,174 @@
+// Wonderware historian compatibility schema for rtininjakustodb
+// Creates raw/event tables, parameter metadata, reusable query functions, and an optional MV.
+
+.create-merge table ww_tag_config (
+    tag_name: string,
+    interpolation_type: string,   // Linear or StairStep
+    area: string,
+    unit: string,
+    is_enabled: bool,
+    display_order: int,
+    description: string
+)
+
+.create-merge table ww_raw_analog (
+    tag_name: string,
+    source_timestamp: datetime,
+    ingest_time: datetime,
+    value: real,
+    quality: string,
+    source: string,
+    source_iteration: long
+)
+
+.create-merge table ww_query_audit (
+    query_time: datetime,
+    user_id: string,
+    view_mode: string,
+    start_time: datetime,
+    end_time: datetime,
+    interval: timespan,
+    tag_filter: dynamic,
+    result_row_count: long,
+    note: string
+)
+
+// Optional acceleration structure for latest-value cards and alerting.
+.create materialized-view with (backfill=true) ww_mv_latest_by_tag on table ww_raw_analog
+{
+    ww_raw_analog
+    | summarize arg_max(source_timestamp, *) by tag_name
+}
+
+.create-or-alter function with (
+    docstring = 'Returns the active tag list from metadata, optionally filtered by area.',
+    folder = 'WonderwareCompat'
+)
+fn_ww_active_tags(area_filter:string='*')
+{
+    ww_tag_config
+    | where is_enabled
+    | where area_filter == '*' or area == area_filter
+    | project tag_name, interpolation_type, area, unit, display_order
+}
+
+.create-or-alter function with (
+    docstring = 'Returns deduplicated raw events where later ingests overwrite earlier values for the same tag/timestamp.',
+    folder = 'WonderwareCompat'
+)
+fn_ww_raw_effective(start_time:datetime, end_time:datetime, tag_filter:dynamic=dynamic([]), area_filter:string='*')
+{
+    let tags =
+        iff(
+            array_length(tag_filter) > 0,
+            tag_filter,
+            toscalar(fn_ww_active_tags(area_filter) | summarize make_set(tag_name))
+        );
+    ww_raw_analog
+    | where source_timestamp between (start_time - 2h .. end_time + 2h)
+    | where tag_name in (tags)
+    | summarize arg_max(ingest_time, *) by tag_name, source_timestamp
+    | project tag_name, source_timestamp, ingest_time, value, quality, source
+}
+
+.create-or-alter function with (
+    docstring = 'Cyclic mode (last known value at each time boundary).',
+    folder = 'WonderwareCompat'
+)
+fn_ww_cyclic(start_time:datetime, end_time:datetime, interval:timespan=1m, tag_filter:dynamic=dynamic([]), area_filter:string='*')
+{
+    let raw = fn_ww_raw_effective(start_time, end_time, tag_filter, area_filter);
+    let bounds =
+        fn_ww_active_tags(area_filter)
+        | where array_length(tag_filter) == 0 or tag_name in (tag_filter)
+        | project tag_name
+        | mv-expand timestamp = range(start_time, end_time, interval) to typeof(datetime);
+    bounds
+    | join kind=leftouter (raw) on tag_name
+    | where source_timestamp <= timestamp
+    | summarize arg_max(source_timestamp, value, quality) by tag_name, timestamp
+    | project tag_name, timestamp, value = todouble(value), quality = tostring(quality), mode = 'Cyclic'
+    | order by tag_name asc, timestamp asc
+}
+
+.create-or-alter function with (
+    docstring = 'Time-weighted average using StairStep interpolation (historian-compatible).',
+    folder = 'WonderwareCompat'
+)
+fn_ww_twa_stair(start_time:datetime, end_time:datetime, interval:timespan=1m, tag_filter:dynamic=dynamic([]), area_filter:string='*')
+{
+    let raw =
+        fn_ww_raw_effective(start_time, end_time, tag_filter, area_filter)
+        | order by tag_name asc, source_timestamp asc
+        | serialize
+        | extend next_ts = next(source_timestamp), next_tag = next(tag_name)
+        | where tag_name == next_tag
+        | extend seg_start = source_timestamp, seg_end = next_ts, seg_value = value
+        | where seg_end > start_time and seg_start < end_time
+        | extend seg_start = max_of(seg_start, start_time), seg_end = min_of(seg_end, end_time);
+    raw
+    | extend b0 = bin(seg_start, interval), b1 = bin(seg_end, interval)
+    | mv-expand bucket = range(b0, b1, interval) to typeof(datetime)
+    | extend overlap_start = max_of(seg_start, bucket), overlap_end = min_of(seg_end, bucket + interval)
+    | extend overlap_sec = datetime_diff('millisecond', overlap_end, overlap_start) / 1000.0
+    | where overlap_sec > 0
+    | summarize weighted_sum = sum(seg_value * overlap_sec), duration_sec = sum(overlap_sec) by tag_name, timestamp = bucket
+    | project tag_name, timestamp, value = iff(duration_sec == 0.0, real(null), weighted_sum / duration_sec), mode = 'TWA_StairStep'
+    | order by tag_name asc, timestamp asc
+}
+
+.create-or-alter function with (
+    docstring = 'Time-weighted average using linear interpolation by densifying to 5-second points and averaging per bucket.',
+    folder = 'WonderwareCompat'
+)
+fn_ww_twa_linear(start_time:datetime, end_time:datetime, interval:timespan=1m, tag_filter:dynamic=dynamic([]), area_filter:string='*')
+{
+    fn_ww_raw_effective(start_time, end_time, tag_filter, area_filter)
+    | make-series v = any(value) default = real(null) on source_timestamp from start_time - 15m to end_time + 15m step 5s by tag_name
+    | extend v_lin = series_fill_linear(v)
+    | mv-expand source_timestamp to typeof(datetime), v_lin to typeof(real)
+    | where source_timestamp between (start_time .. end_time)
+    | summarize value = avg(v_lin) by tag_name, timestamp = bin(source_timestamp, interval)
+    | project tag_name, timestamp, value, mode = 'TWA_Linear'
+    | order by tag_name asc, timestamp asc
+}
+
+.create-or-alter function with (
+    docstring = 'Historian-style as-of linear TWA. Only points ingested up to asof_time are visible.',
+    folder = 'WonderwareCompat'
+)
+fn_ww_twa_linear_asof(start_time:datetime, end_time:datetime, interval:timespan=1m, asof_time:datetime, tag_filter:dynamic=dynamic([]), area_filter:string='*')
+{
+    let tags =
+        iff(
+            array_length(tag_filter) > 0,
+            tag_filter,
+            toscalar(fn_ww_active_tags(area_filter) | summarize make_set(tag_name))
+        );
+    ww_raw_analog
+    | where ingest_time <= asof_time
+    | where source_timestamp between (start_time - 2h .. end_time + 2h)
+    | where tag_name in (tags)
+    | summarize arg_max(ingest_time, *) by tag_name, source_timestamp
+    | make-series v = any(value) default = real(null) on source_timestamp from start_time - 15m to end_time + 15m step 5s by tag_name
+    | extend v_lin = series_fill_linear(v)
+    | mv-expand source_timestamp to typeof(datetime), v_lin to typeof(real)
+    | where source_timestamp between (start_time .. end_time)
+    | summarize value = avg(v_lin) by tag_name, timestamp = bin(source_timestamp, interval)
+    | project tag_name, timestamp, value, mode = 'TWA_Linear_AsOf'
+    | order by tag_name asc, timestamp asc
+}
+
+.create-or-alter function with (
+    docstring = 'Single parameterized entrypoint that matches Wonderware retrieval modes.',
+    folder = 'WonderwareCompat'
+)
+fn_ww_view(retrieval_mode:string, start_time:datetime, end_time:datetime, interval:timespan, tag_filter:dynamic, area_filter:string)
+{
+    union
+    (fn_ww_cyclic(start_time, end_time, interval, tag_filter, area_filter) | extend _mode='Cyclic'),
+    (fn_ww_twa_stair(start_time, end_time, interval, tag_filter, area_filter) | extend _mode='TWA_StairStep'),
+    (fn_ww_twa_linear(start_time, end_time, interval, tag_filter, area_filter) | extend _mode='TWA_Linear')
+    | where _mode =~ retrieval_mode
+    | project-away _mode
+}

@@ -1,0 +1,84 @@
+// Validation scripts proving Wonderware-compatible behavior.
+
+// Test 1: Historical cyclic stability (for past boundary)
+// Expected: delta = 0.0 for Silo1 at 04:15 when compared across as-of snapshots.
+let t_start = datetime(2026-05-11 04:00:00);
+let t_end   = datetime(2026-05-11 04:30:00);
+let tagset  = dynamic(['WND_106_BATCH_BH_Actual_Weight_Silo1_Deviation']);
+let cyc_before =
+    ww_raw_analog
+    | where ingest_time <= datetime(2026-05-11 04:20:00)
+    | summarize arg_max(ingest_time, *) by tag_name, source_timestamp
+    | where tag_name in (tagset)
+    | where source_timestamp <= datetime(2026-05-11 04:15:00)
+    | summarize arg_max(source_timestamp, value) by tag_name
+    | project tag_name, cyc_before = todouble(value);
+let cyc_after =
+    ww_raw_analog
+    | where ingest_time <= datetime(2026-05-11 04:35:00)
+    | summarize arg_max(ingest_time, *) by tag_name, source_timestamp
+    | where tag_name in (tagset)
+    | where source_timestamp <= datetime(2026-05-11 04:15:00)
+    | summarize arg_max(source_timestamp, value) by tag_name
+    | project tag_name, cyc_after = todouble(value);
+cyc_before
+| join kind=inner cyc_after on tag_name
+| extend delta = round(cyc_after - cyc_before, 5)
+| project test = 'Cyclic stability at historical minute', tag_name, cyc_before, cyc_after, delta,
+          result = iff(abs(delta) < 0.00001, 'PASS', 'FAIL');
+
+// Test 2: Retroactive linear TWA drift caused by late-arriving point
+// Expected: changed value around 04:15 for Silo1.
+let tw_before =
+    fn_ww_twa_linear_asof(t_start, t_end, 1m, datetime(2026-05-11 04:20:00), tagset)
+    | where timestamp == datetime(2026-05-11 04:15:00)
+    | project tag_name, twa_before = value;
+let tw_after =
+    fn_ww_twa_linear_asof(t_start, t_end, 1m, datetime(2026-05-11 04:35:00), tagset)
+    | where timestamp == datetime(2026-05-11 04:15:00)
+    | project tag_name, twa_after = value;
+tw_before
+| join kind=inner tw_after on tag_name
+| extend drift = round(twa_after - twa_before, 5)
+| extend drift_pct = round(100.0 * drift / iif(abs(twa_before) < 0.00001, 1.0, abs(twa_before)), 2)
+| project test = 'Linear TWA retroactive drift', tag_name, twa_before, twa_after, drift, drift_pct,
+          result = iff(abs(drift) > 0.00001, 'PASS', 'FAIL');
+
+// Test 3: Parameterized retrieval mode selector
+// Expected: returns rows for chosen mode only.
+fn_ww_view('Cyclic', datetime(2026-05-11 04:10:00), datetime(2026-05-11 04:20:00), 1m, dynamic(['WND_106_BATCH_Mixer_Temp']), '*')
+| summarize rows=count(), modes=make_set(mode)
+| project test = 'Mode selector', rows, modes, result = iff(rows > 0 and array_length(modes) == 1 and tostring(modes[0]) == 'Cyclic', 'PASS', 'FAIL');
+
+// Test 4: MV acceleration availability
+// Expected: one latest row per enabled tag.
+ww_mv_latest_by_tag
+| summarize latest_rows = count(), unique_tags = dcount(tag_name)
+| join kind=inner (fn_ww_active_tags('*') | summarize enabled_tags = dcount(tag_name)) on 1==1
+| project test = 'Materialized latest view coverage', latest_rows, unique_tags, enabled_tags,
+          result = iff(unique_tags == enabled_tags, 'PASS', 'FAIL');
+
+// Test 5: Late arrivals detection (data-derived bounds, no _endTime dependency)
+// Expected: at least one late-arriving row (the 04:22 Silo1 point ingested at 04:29).
+ww_raw_analog
+| where source_timestamp < ingest_time - 3m
+| summarize late_rows = count()
+| project test = 'Late arrivals detection', late_rows,
+          result = iff(late_rows >= 1, 'PASS', 'FAIL');
+
+// Test 6: Retroactive drift detector (data-derived as-of, no _endTime dependency)
+// Expected: rows where drift > 0.001 exist.
+let tags = dynamic(['WND_106_BATCH_BH_Actual_Weight_Silo1_Deviation']);
+let data_start = toscalar(ww_raw_analog | summarize min(source_timestamp));
+let data_end   = toscalar(ww_raw_analog | summarize max(source_timestamp));
+let asof_mid   = toscalar(ww_raw_analog | summarize min(ingest_time) + (max(ingest_time) - min(ingest_time)) / 2);
+let before = fn_ww_twa_linear_asof(data_start, data_end, 1m, asof_mid, tags)
+    | project tag_name, timestamp, before_val=value;
+let nowv   = fn_ww_twa_linear(data_start, data_end, 1m, tags)
+    | project tag_name, timestamp, now_val=value;
+before
+| join kind=inner nowv on tag_name, timestamp
+| extend drift = now_val - before_val
+| summarize drift_rows = countif(abs(drift) > 0.001)
+| project test = 'Drift detector data-derived', drift_rows,
+          result = iff(drift_rows >= 1, 'PASS', 'FAIL');

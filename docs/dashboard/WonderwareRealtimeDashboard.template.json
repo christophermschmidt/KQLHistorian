@@ -1,0 +1,173 @@
+{
+  "schema_version": "52",
+  "pagesNavWidth": 241,
+  "dataSources": [
+    {
+      "id": "aa100001-0001-4001-8001-000000000001",
+      "kind": "kusto-trident",
+      "scopeId": "kusto-trident",
+      "clusterUri": "__CLUSTER_URI__",
+      "database": "__KQL_DB_ID__",
+      "name": "__KQL_DB_NAME__",
+      "workspace": "__WORKSPACE_ID__"
+    }
+  ],
+  "pages": [
+    {
+      "id": "bb100001-0001-4001-8001-000000000001",
+      "name": "Historian Control Tower"
+    }
+  ],
+  "parameters": [
+    {
+      "id": "cc100001-0001-4001-8001-000000000001",
+      "kind": "duration",
+      "displayName": "Time range",
+      "description": "",
+      "beginVariableName": "_startTime",
+      "endVariableName": "_endTime",
+      "defaultValue": {
+        "kind": "dynamic",
+        "count": 30,
+        "unit": "minutes"
+      },
+      "showOnPages": {
+        "kind": "all"
+      }
+    },
+    {
+      "id": "cc100001-0002-4001-8001-000000000002",
+      "kind": "string",
+      "displayName": "Retrieval Mode",
+      "description": "Switch between historian retrieval modes",
+      "variableName": "_retrieval_mode",
+      "selectionType": "scalar",
+      "includeAllOption": false,
+      "defaultValue": {
+        "kind": "value",
+        "value": "Cyclic"
+      },
+      "dataSource": {
+        "kind": "static",
+        "values": [
+          { "value": "Cyclic" },
+          { "value": "TWA_Linear" },
+          { "value": "TWA_StairStep" }
+        ]
+      },
+      "showOnPages": {
+        "kind": "all"
+      }
+    }
+  ],
+  "baseQueries": [],
+  "queries": [
+    {
+      "id": "dd100001-0001-4001-8001-000000000001",
+      "dataSource": {
+        "kind": "inline",
+        "dataSourceId": "aa100001-0001-4001-8001-000000000001"
+      },
+      "usedVariables": [],
+      "text": "fn_ww_active_tags('*') | summarize ActiveTags=count()"
+    },
+    {
+      "id": "dd100001-0002-4001-8001-000000000002",
+      "dataSource": {
+        "kind": "inline",
+        "dataSourceId": "aa100001-0001-4001-8001-000000000001"
+      },
+      "usedVariables": [],
+      "text": "ww_mv_latest_by_tag | project tag_name, source_timestamp, value, quality | order by source_timestamp desc | take 25"
+    },
+    {
+      "id": "dd100001-0003-4001-8001-000000000003",
+      "dataSource": {
+        "kind": "inline",
+        "dataSourceId": "aa100001-0001-4001-8001-000000000001"
+      },
+      "usedVariables": ["_startTime", "_endTime", "_retrieval_mode"],
+      "text": "fn_ww_view(_retrieval_mode, _startTime, _endTime, 1m, dynamic(['WND_106_BATCH_BH_Actual_Weight_Silo1_Deviation','WND_106_BATCH_BH_Actual_Weight_Silo2_Deviation','WND_106_BATCH_Mixer_Temp','WND_106_BATCH_LinePressure']), '*') | project timestamp, tag_name, value"
+    },
+    {
+      "id": "dd100001-0006-4001-8001-000000000006",
+      "dataSource": {
+        "kind": "inline",
+        "dataSourceId": "aa100001-0001-4001-8001-000000000001"
+      },
+      "usedVariables": [],
+      "text": "let tags = dynamic(['WND_106_BATCH_BH_Actual_Weight_Silo1_Deviation']); let data_start = toscalar(ww_raw_analog | summarize min(source_timestamp)); let data_end = toscalar(ww_raw_analog | summarize max(source_timestamp)); let asof_mid = toscalar(ww_raw_analog | summarize min(ingest_time) + (max(ingest_time) - min(ingest_time)) / 2); let before = fn_ww_twa_linear_asof(data_start, data_end, 1m, asof_mid, tags) | project tag_name, timestamp, before_val=value; let nowv = fn_ww_twa_linear(data_start, data_end, 1m, tags) | project tag_name, timestamp, now_val=value; before | join kind=inner nowv on tag_name, timestamp | extend drift = now_val - before_val | where abs(drift) > 0.001 | project timestamp, tag_name, before_val, now_val, drift | order by timestamp desc"
+    },
+    {
+      "id": "dd100001-0007-4001-8001-000000000007",
+      "dataSource": {
+        "kind": "inline",
+        "dataSourceId": "aa100001-0001-4001-8001-000000000001"
+      },
+      "usedVariables": [],
+      "text": "ww_raw_analog | where source_timestamp < ingest_time - 3m | project ingest_time, source_timestamp, tag_name, value, lag_minutes=round(todouble(datetime_diff('second', ingest_time, source_timestamp)) / 60.0, 2) | order by ingest_time desc | take 25"
+    }
+  ],
+  "tiles": [
+    {
+      "id": "ee100001-0001-4001-8001-000000000001",
+      "title": "Active Historian Tags",
+      "visualType": "card",
+      "queryRef": {
+        "kind": "query",
+        "queryId": "dd100001-0001-4001-8001-000000000001"
+      },
+      "pageId": "bb100001-0001-4001-8001-000000000001",
+      "layout": { "x": 0, "y": 0, "width": 4, "height": 3 },
+      "visualOptions": { "colorRulesDisabled": true, "colorRules": [], "selectedDataOnLoad": { "all": true, "limit": 10 }, "dataPointsTooltip": { "all": false, "limit": 1 } }
+    },
+    {
+      "id": "ee100001-0002-4001-8001-000000000002",
+      "title": "Latest Values",
+      "visualType": "table",
+      "queryRef": {
+        "kind": "query",
+        "queryId": "dd100001-0002-4001-8001-000000000002"
+      },
+      "pageId": "bb100001-0001-4001-8001-000000000001",
+      "layout": { "x": 4, "y": 0, "width": 16, "height": 7 },
+      "visualOptions": { "colorRulesDisabled": true, "colorRules": [], "selectedDataOnLoad": { "all": true, "limit": 10 }, "dataPointsTooltip": { "all": false, "limit": 1 } }
+    },
+    {
+      "id": "ee100001-0003-4001-8001-000000000003",
+      "title": "Tag Trend View",
+      "visualType": "line",
+      "queryRef": {
+        "kind": "query",
+        "queryId": "dd100001-0003-4001-8001-000000000003"
+      },
+      "pageId": "bb100001-0001-4001-8001-000000000001",
+      "layout": { "x": 0, "y": 7, "width": 20, "height": 7 },
+      "visualOptions": { "colorRulesDisabled": true, "colorRules": [], "selectedDataOnLoad": { "all": true, "limit": 10 }, "dataPointsTooltip": { "all": false, "limit": 1 } }
+    },
+    {
+      "id": "ee100001-0006-4001-8001-000000000006",
+      "title": "Retroactive Drift Detector",
+      "visualType": "table",
+      "queryRef": {
+        "kind": "query",
+        "queryId": "dd100001-0006-4001-8001-000000000006"
+      },
+      "pageId": "bb100001-0001-4001-8001-000000000001",
+      "layout": { "x": 0, "y": 14, "width": 10, "height": 7 },
+      "visualOptions": { "colorRulesDisabled": true, "colorRules": [], "selectedDataOnLoad": { "all": true, "limit": 10 }, "dataPointsTooltip": { "all": false, "limit": 1 } }
+    },
+    {
+      "id": "ee100001-0007-4001-8001-000000000007",
+      "title": "Late Arrivals (30m)",
+      "visualType": "table",
+      "queryRef": {
+        "kind": "query",
+        "queryId": "dd100001-0007-4001-8001-000000000007"
+      },
+      "pageId": "bb100001-0001-4001-8001-000000000001",
+      "layout": { "x": 10, "y": 14, "width": 10, "height": 7 },
+      "visualOptions": { "colorRulesDisabled": true, "colorRules": [], "selectedDataOnLoad": { "all": true, "limit": 10 }, "dataPointsTooltip": { "all": false, "limit": 1 } }
+    }
+  ]
+}
