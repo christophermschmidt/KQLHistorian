@@ -8,6 +8,10 @@ docs/blog/
 # Internal voice calibration
 .github/.skills/VOICE_CALIBRATION.md
 
+# Customer / meeting artifacts (not for public repo)
+MeetingTranscript.md
+EmailReply.md
+
 # Local environment
 .env
 
