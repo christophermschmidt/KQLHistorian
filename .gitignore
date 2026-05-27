@@ -8,6 +8,9 @@ docs/blog/
 # Internal voice calibration
 .github/.skills/VOICE_CALIBRATION.md
 
+# Local environment
+.env
+
 # Local
 *.log
 .DS_Store

@@ -1,6 +1,7 @@
+. "$PSScriptRoot\_env.ps1"
 $tok = az account get-access-token --resource https://kusto.kusto.windows.net --query accessToken -o tsv
-$cluster = 'https://trd-ssnd5nx50gey5rc8hs.z3.kusto.fabric.microsoft.com'
-$db = 'rtininjakustodb'
+$cluster = $KustoClusterUri
+$db = $KustoDatabase
 $headers = @{ Authorization = "Bearer $tok"; 'Content-Type' = 'application/json' }
 $kql = @'
 let tag = 'WND_106_BATCH_BH_Actual_Weight_Silo1_Deviation';
