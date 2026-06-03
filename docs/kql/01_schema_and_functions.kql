@@ -64,10 +64,21 @@ fn_ww_raw_effective(start_time:datetime, end_time:datetime, tag_filter:dynamic=d
             tag_filter,
             toscalar(fn_ww_active_tags(area_filter) | summarize make_set(tag_name))
         );
-    ww_raw_analog
-    | where source_timestamp between (start_time - 2h .. end_time + 2h)
-    | where tag_name in (tags)
-    | summarize arg_max(ingest_time, *) by tag_name, source_timestamp
+    // In-window points (small pad lets segment math line up on the right edge).
+    let in_window =
+        ww_raw_analog
+        | where tag_name in (tags)
+        | where source_timestamp between (start_time .. end_time + 2h)
+        | summarize arg_max(ingest_time, *) by tag_name, source_timestamp;
+    // Seed: most recent point strictly before start_time per tag.
+    // Unbounded lookback so tags that update once a week / month / year still render.
+    let seed =
+        ww_raw_analog
+        | where tag_name in (tags)
+        | where source_timestamp < start_time
+        | summarize arg_max(source_timestamp, *) by tag_name
+        | summarize arg_max(ingest_time, *) by tag_name, source_timestamp;
+    union in_window, seed
     | project tag_name, source_timestamp, ingest_time, value, quality, source
 }
 
@@ -145,11 +156,17 @@ fn_ww_twa_linear_asof(start_time:datetime, end_time:datetime, interval:timespan=
             tag_filter,
             toscalar(fn_ww_active_tags(area_filter) | summarize make_set(tag_name))
         );
-    ww_raw_analog
-    | where ingest_time <= asof_time
-    | where source_timestamp between (start_time - 2h .. end_time + 2h)
-    | where tag_name in (tags)
-    | summarize arg_max(ingest_time, *) by tag_name, source_timestamp
+    let visible = ww_raw_analog | where ingest_time <= asof_time | where tag_name in (tags);
+    let in_window =
+        visible
+        | where source_timestamp between (start_time .. end_time + 2h)
+        | summarize arg_max(ingest_time, *) by tag_name, source_timestamp;
+    let seed =
+        visible
+        | where source_timestamp < start_time
+        | summarize arg_max(source_timestamp, *) by tag_name
+        | summarize arg_max(ingest_time, *) by tag_name, source_timestamp;
+    union in_window, seed
     | make-series v = any(value) default = real(null) on source_timestamp from start_time - 15m to end_time + 15m step 5s by tag_name
     | extend v_lin = series_fill_linear(v)
     | mv-expand source_timestamp to typeof(datetime), v_lin to typeof(real)
